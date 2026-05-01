@@ -65,9 +65,9 @@ FileContent* loadContent (FILE* fd) {
     
     char *l = NULL;
     size_t cap = 0;
-    ssize_t contentLen;
+    size_t contentLen;
 
-    while ((contentLen = getline(&l, &cap, fd)) != -1) {
+    while ((contentLen = getline(&l, &cap, fd)) != (size_t)-1) {
         if (contentLen > 0 && l[contentLen-1] == '\n') l[contentLen-1] = '\0';
 
         Line *tmp = realloc(fileContent->lineArray, sizeof(Line) * (fileContent->lineCount + 1u));
@@ -78,11 +78,12 @@ FileContent* loadContent (FILE* fd) {
 
         fileContent->lineArray = tmp;
 
-        fileContent->lineArray[fileContent->lineCount].len = contentLen - 1;
+        fileContent->lineArray[fileContent->lineCount].len = contentLen - 1u;
         fileContent->lineArray[fileContent->lineCount].string = strdup(l);
         fileContent->lineCount++;
     }
-
+    
+    free(l);
     return fileContent;
 }
 
@@ -91,9 +92,9 @@ void printContent (FileContent* file, char *buf, size_t bufSize) {
     size_t len = 0;
 
     for (size_t i = 1; i <= file->lineCount; i++) {
-        len += snprintf(buf+len, bufSize - len, "%s\r\n", file->lineArray[i-1].string);
+        len += (size_t)snprintf(buf+len, bufSize - len, "%s\r\n", file->lineArray[i-1].string);
     }
-    len += snprintf(buf + len, bufSize - len, "\x1b[H");
+    len += (size_t)snprintf(buf + len, bufSize - len, "\x1b[H");
     write(STDOUT_FILENO, buf, len);
 
     return;
@@ -116,7 +117,6 @@ void handleMove (FileContent* file, char *key, size_t *x, size_t *y, char *buf, 
                         if ((*y) > 0) {
                             (*y)--; 
                             *x = file->lineArray[(*y)+1].len > file->lineArray[(*y)].len && *x == file->lineArray[(*y)+1].len ? file->lineArray[*y].len : *x;
-
                         }
                         break;
                     case 'B': 
@@ -142,19 +142,19 @@ void handleMove (FileContent* file, char *key, size_t *x, size_t *y, char *buf, 
                 }
                 
                 // Clear screen
-                len += snprintf(buf + len, bufSize - len, "\x1b[2J\x1b[H");
+                len += (size_t)snprintf(buf + len, bufSize - len, "\x1b[2J\x1b[H");
 
                 // Print file content
                 for (size_t i = 1; i <= file->lineCount; i++) {
-                    len += snprintf(buf+len, bufSize - len, "%s\r\n", file->lineArray[i-1].string);
+                    len += (size_t)snprintf(buf+len, bufSize - len, "%s\r\n", file->lineArray[i-1].string);
                 }
 
                 // Move cursor after input
-                len += snprintf(buf + len, bufSize - len, "\x1b[%d;%dH", (int)(*y)+1, (int)(*x)+1);
+                len += (size_t)snprintf(buf + len, bufSize - len, "\x1b[%d;%dH", (int)((*y)+(size_t)1), (int)((*x)+(size_t)1));
                 // len += snprintf(screen + len, sizeof(screen) - len, "\x1b[%d;%dH\n\n\ny value: %d", y + 1, x + 1, y);
 
                 // Now re-render
-                write(STDOUT_FILENO, file, len);
+                write(STDOUT_FILENO, buf, len);
             }
         }   
 }
