@@ -65,9 +65,9 @@ FileContent* loadContent (FILE* fd) {
     
     char *l = NULL;
     size_t cap = 0;
-    size_t contentLen;
+    ssize_t contentLen;
 
-    while ((contentLen = getline(&l, &cap, fd)) != (size_t)-1) {
+    while ((contentLen = getline(&l, &cap, fd)) != (ssize_t)-1) {
         if (contentLen > 0 && l[contentLen-1] == '\n') l[contentLen-1] = '\0';
 
         Line *tmp = realloc(fileContent->lineArray, sizeof(Line) * (fileContent->lineCount + 1u));
@@ -78,7 +78,7 @@ FileContent* loadContent (FILE* fd) {
 
         fileContent->lineArray = tmp;
 
-        fileContent->lineArray[fileContent->lineCount].len = contentLen - 1u;
+        fileContent->lineArray[fileContent->lineCount].len = strlen(l);
         fileContent->lineArray[fileContent->lineCount].string = strdup(l);
         fileContent->lineCount++;
     }
@@ -113,7 +113,7 @@ void handleWrite(FileContent *file, char *fileBuf, FILE *fd, char *key, size_t *
     if (*key != '\x1b') {
         fseek(fd, 0, SEEK_SET
         );
-        file->lineArray[*y].string = realloc(file->lineArray[*y].string, file->lineArray[*y].len+1);
+        file->lineArray[*y].string = realloc(file->lineArray[*y].string, file->lineArray[*y].len+2);
         memmove(&file->lineArray[*y].string[(*x)+1], &file->lineArray[*y].string[(*x)], file->lineArray[*y].len - *x + 1);
         
         
