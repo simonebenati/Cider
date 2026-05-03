@@ -87,16 +87,53 @@ FileContent* loadContent (FILE* fd) {
     return fileContent;
 }
 
-void printContent (FileContent* file, char *buf, size_t bufSize) {
+void printContent (FileContent* file, char *buf, size_t bufSize, size_t *xCord, size_t *yCord) {
 
     size_t len = 0;
 
+    len += (size_t)snprintf(buf + len, bufSize - len, "\x1b[2J\x1b[H");
+
+    // Go over each file line and add them to buffer
     for (size_t i = 1; i <= file->lineCount; i++) {
         len += (size_t)snprintf(buf+len, bufSize - len, "%s\r\n", file->lineArray[i-1].string);
     }
+    // Escape sequence to place cursor at the beginning
     len += (size_t)snprintf(buf + len, bufSize - len, "\x1b[H");
+
+    // If x or y are different move appropriately the cursor
+    if (*xCord != 0u || *yCord != 0) 
+        len += (size_t)snprintf(buf + len, bufSize - len, "\x1b[%d;%dH", (int)((*yCord)+(size_t)1), (int)((*xCord)+(size_t)1));
+
     write(STDOUT_FILENO, buf, len);
 
+    return;
+}
+
+void handleWrite(FileContent *file, char *fileBuf, FILE *fd, char *key, size_t *x, size_t *y, char *buf, size_t bufSize) {
+    if (*key != '\x1b') {
+        fseek(fd, 0, SEEK_SET
+        );
+        file->lineArray[*y].string = realloc(file->lineArray[*y].string, file->lineArray[*y].len+1);
+        memmove(&file->lineArray[*y].string[(*x)+1], &file->lineArray[*y].string[(*x)], file->lineArray[*y].len - *x + 1);
+        
+        
+        file->lineArray[*y].string[(*x)] = *key;
+        file->lineArray[*y].len++;
+
+        size_t len = 0;
+        //Write to file
+         for (size_t i = 0; i < file->lineCount; i++) {
+            if (i+1 == file->lineCount) 
+                len += (size_t)snprintf(fileBuf+len, bufSize - len, "%s", file->lineArray[i].string);
+            else 
+                len += (size_t)snprintf(fileBuf+len, bufSize - len, "%s\n", file->lineArray[i].string);
+        }
+        
+        (*x)++;
+        printContent(file, buf, bufSize, x, y);
+        fwrite(fileBuf, 1, strlen(fileBuf), fd);
+        fflush(fd);
+    }
     return;
 }
 
@@ -105,9 +142,7 @@ void handleMove (FileContent* file, char *key, size_t *x, size_t *y, char *buf, 
             char seq[2];
             size_t len = 0;
             
-
-
-            // If the first byte or second is not 1 (zero or corrupted) we return - Safety check
+            // Did input succeed? if the first or second read didn't return 1 we exit - Safety check
             if (read(STDIN_FILENO, &seq[0], 1) != 1) return;
             if (read(STDIN_FILENO, &seq[1], 1) != 1) return;
             
@@ -141,22 +176,12 @@ void handleMove (FileContent* file, char *key, size_t *x, size_t *y, char *buf, 
                         break;
                 }
                 
-                // Clear screen
-                len += (size_t)snprintf(buf + len, bufSize - len, "\x1b[2J\x1b[H");
+                printContent(file, buf, bufSize, x, y);
 
-                // Print file content
-                for (size_t i = 1; i <= file->lineCount; i++) {
-                    len += (size_t)snprintf(buf+len, bufSize - len, "%s\r\n", file->lineArray[i-1].string);
-                }
-
-                // Move cursor after input
-                len += (size_t)snprintf(buf + len, bufSize - len, "\x1b[%d;%dH", (int)((*y)+(size_t)1), (int)((*x)+(size_t)1));
-                // len += snprintf(screen + len, sizeof(screen) - len, "\x1b[%d;%dH\n\n\ny value: %d", y + 1, x + 1, y);
-
-                // Now re-render
-                write(STDOUT_FILENO, buf, len);
             }
-        }   
+        }
+
+    return;
 }
 
 int main () {
@@ -165,17 +190,17 @@ int main () {
     enableRawMode();
 
     // Open a file
-    FILE *fd = openFile("./File.txt", "r");
+    FILE *fd = openFile("./File.txt", "r+");
 
     // Load content of file in memory ready to be parsed
     FileContent *content = loadContent(fd);
 
     char screen[4096];
-    printContent(content, screen, sizeof(screen));
-
+    char fileBuf[4096];
     size_t x = 0;
     size_t y = 0;
-    
+
+    printContent(content, screen, sizeof(screen), &x, &y);
 
     while (1) {
         char c;
@@ -183,9 +208,14 @@ int main () {
             fprintf(stderr, "Error reading input: %s\n", strerror(errno));
             abort();
         }
-        handleMove(content, &c, &x, &y, screen, sizeof(screen));
+
         // \x1b is ESC
-           
+        if (c == '\x1b') 
+            handleMove(content, &c, &x, &y, screen, sizeof(screen));
+        else
+            handleWrite(content, fileBuf, fd, &c, &x, &y, screen, sizeof(screen));
+            
+        
     }
 
     // Close the file
