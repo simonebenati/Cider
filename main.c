@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,7 +44,26 @@ typedef struct {
     Line *lineArray;
 } FileContent;
 
-FILE* openFile (char* filename, char* modes) {
+size_t getTermSize(const FileContent *file) {
+    size_t fileSize = 1;
+    for (size_t i = 0; i < file->lineCount; i++) {
+        fileSize += file->lineArray[i].len+2;
+    }
+    return fileSize;
+}
+
+size_t getFileSize(const FileContent *file) {
+    size_t size = 1;
+    for (size_t i = 0; i < file->lineCount; i++) {
+        size += file->lineArray[i].len;
+
+        if (i + 1 != file->lineCount)
+            size += 1;
+    }
+    return size;
+}
+
+FILE* openFile (const char* filename, char* modes) {
     FILE *fd = fopen(filename, modes);
     if (fd == NULL) {
         fprintf(stderr, "Error opening file: %s\n", strerror(errno));
@@ -87,64 +107,130 @@ FileContent* loadContent (FILE* fd) {
     return fileContent;
 }
 
-void printContent (FileContent* file, char *buf, size_t bufSize, size_t *xCord, size_t *yCord) {
+ssize_t safeAppend (char **buf, size_t *size, size_t *pos, const char *format, ...) {
+    va_list args, cp;
+    va_start(args, format);
+    va_copy(cp, args);
 
-    size_t len = 0;
+    int n = 0;
+    n = vsnprintf(*buf + *pos, *size - *pos, format, args);
+    if (n < 0) {
+        free(*buf);
+        *buf = NULL;
+        va_end(args);
+        va_end(cp);
+        return -1;
+    }
+    size_t need = (size_t)n;
+    // Bytes to write bigger than actual buf
+    if (need >= *size - *pos) {
+        void *tmp = NULL;
+        // To avoid theoretical overflow of size_t (wraparound)
+        while (*size - *pos <= need) {
+            *size *= 2;
+            tmp = realloc(*buf, *size);
+            if (tmp == NULL) {
+                free(*buf);
+                *buf = NULL;
+                va_end(args);
+                va_end(cp);
+                return -1;
+            };
+            *buf = tmp;
+        }
+        n = vsnprintf(*buf + *pos, *size - *pos, format, cp);
+        if (n < 0) {
+            free(*buf);
+            *buf = NULL;
+            va_end(args);
+            va_end(cp);
+            return -1;
+        }
+        need = (size_t)n;
+    }
 
-    len += (size_t)snprintf(buf + len, bufSize - len, "\x1b[2J\x1b[H");
+    *pos += need;
+    va_end(args);
+    va_end(cp);
+    return 1;
+}
+
+size_t printContent (FileContent* file, size_t *xCord, size_t *yCord) {
+    size_t pos = 0;
+    size_t size = 50;
+
+    char *buf = malloc(size);
+    if (buf == NULL) return 1;
+
+    ssize_t ret = safeAppend(&buf, &size, &pos, "\x1b[2J\x1b[H");
+    if (ret == -1) {
+        return 1;
+    }
 
     // Go over each file line and add them to buffer
     for (size_t i = 1; i <= file->lineCount; i++) {
-        len += (size_t)snprintf(buf+len, bufSize - len, "%s\r\n", file->lineArray[i-1].string);
+        ret = safeAppend(&buf, &size, &pos, "%s\r\n", file->lineArray[i-1].string);
+        if (ret == -1) {
+            return 1;
+        }
     }
+
     // Escape sequence to place cursor at the beginning
-    len += (size_t)snprintf(buf + len, bufSize - len, "\x1b[H");
+    ret = safeAppend(&buf, &size, &pos, "\x1b[H");
+    if (ret == -1) {
+        return 1;
+    }
 
     // If x or y are different move appropriately the cursor
-    if (*xCord != 0u || *yCord != 0) 
-        len += (size_t)snprintf(buf + len, bufSize - len, "\x1b[%d;%dH", (int)((*yCord)+(size_t)1), (int)((*xCord)+(size_t)1));
+    if (*xCord != 0u || *yCord != 0) {
 
-    write(STDOUT_FILENO, buf, len);
+        ret = safeAppend(&buf, &size, &pos, "\x1b[%d;%dH", (int)((*yCord)+(size_t)1), (int)((*xCord)+(size_t)1));
+        if (ret == -1) {
+            return 1;
+        }
+    }
 
-    return;
+    write(STDOUT_FILENO, buf, pos);
+    free(buf);
+
+    return size;
 }
 
-void handleWrite(FileContent *file, char *fileBuf, FILE *fd, char *key, size_t *x, size_t *y, char *buf, size_t bufSize) {
+size_t handleWrite(FileContent *file, FILE *fd, char *key, size_t *x, size_t *y) {
     if (*key != '\x1b') {
-        fseek(fd, 0, SEEK_SET
-        );
+        fseek(fd, 0, SEEK_SET);
         file->lineArray[*y].string = realloc(file->lineArray[*y].string, file->lineArray[*y].len+2);
         memmove(&file->lineArray[*y].string[(*x)+1], &file->lineArray[*y].string[(*x)], file->lineArray[*y].len - *x + 1);
-        
-        
+          
         file->lineArray[*y].string[(*x)] = *key;
         file->lineArray[*y].len++;
 
         size_t len = 0;
+        size_t size = getTermSize(file);
+        char *fileBuf = malloc(size);
+        if (fileBuf == NULL) return 1;
         //Write to file
          for (size_t i = 0; i < file->lineCount; i++) {
-            if (i+1 == file->lineCount) 
-                len += (size_t)snprintf(fileBuf+len, bufSize - len, "%s", file->lineArray[i].string);
-            else 
-                len += (size_t)snprintf(fileBuf+len, bufSize - len, "%s\n", file->lineArray[i].string);
+            if (i+1 == file->lineCount)
+                safeAppend(&fileBuf, &size, &len, "%s", file->lineArray[i].string);
+            else
+                safeAppend(&fileBuf, &size, &len, "%s\n", file->lineArray[i].string);
         }
         
         (*x)++;
-        printContent(file, buf, bufSize, x, y);
         fwrite(fileBuf, 1, strlen(fileBuf), fd);
         fflush(fd);
     }
-    return;
+    return printContent(file, x, y);
 }
 
-void handleMove (FileContent* file, char *key, size_t *x, size_t *y, char *buf, size_t bufSize) {
+size_t handleMove (FileContent* file, char *key, size_t *x, size_t *y, char *buf) {
     if (*key == '\x1b') {
             char seq[2];
-            size_t len = 0;
             
             // Did input succeed? if the first or second read didn't return 1 we exit - Safety check
-            if (read(STDIN_FILENO, &seq[0], 1) != 1) return;
-            if (read(STDIN_FILENO, &seq[1], 1) != 1) return;
+            if (read(STDIN_FILENO, &seq[0], 1) != 1) return 1;
+            if (read(STDIN_FILENO, &seq[1], 1) != 1) return 1;
             
             if (seq[0] == '[') {
                 switch (seq[1]) {
@@ -157,7 +243,7 @@ void handleMove (FileContent* file, char *key, size_t *x, size_t *y, char *buf, 
                     case 'B': 
                         if ((*y) < file->lineCount - 1) {
                             (*y)++;
-                            *x = file->lineArray[(*y)-1].len > file->lineArray[(*y)].len && *x == file->lineArray[(*y)-1].len ? file->lineArray[(*y)].len : *x;
+                            *x = file->lineArray[(*y)-1].len > file->lineArray[(*y)].len && *x == file->lineArray[(*y)-1].len ? file->lineArray[(*y)].len : file->lineArray[(*y)-1].len > file->lineArray[(*y)].len ? file->lineArray[(*y)].len : *x;
                         }
                         break;
                     case 'C': 
@@ -176,12 +262,12 @@ void handleMove (FileContent* file, char *key, size_t *x, size_t *y, char *buf, 
                         break;
                 }
                 
-                printContent(file, buf, bufSize, x, y);
-
+                
             }
         }
+        
 
-    return;
+    return printContent(file, x, y);;
 }
 
 int main () {
@@ -196,11 +282,11 @@ int main () {
     FileContent *content = loadContent(fd);
 
     char screen[4096];
-    char fileBuf[4096];
+    // char *fileBuf = NULL;
     size_t x = 0;
     size_t y = 0;
 
-    printContent(content, screen, sizeof(screen), &x, &y);
+    size_t bufSize =  printContent(content, &x, &y);
 
     while (1) {
         char c;
@@ -211,9 +297,9 @@ int main () {
 
         // \x1b is ESC
         if (c == '\x1b') 
-            handleMove(content, &c, &x, &y, screen, sizeof(screen));
+            handleMove(content, &c, &x, &y, screen);
         else
-            handleWrite(content, fileBuf, fd, &c, &x, &y, screen, sizeof(screen));
+            handleWrite(content, fd, &c, &x, &y);
             
         
     }
