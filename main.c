@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <stdarg.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -113,6 +114,11 @@ ssize_t safeAppend (char **buf, size_t *size, size_t *pos, const char *format, .
     va_copy(cp, args);
 
     int n = 0;
+    if (*buf == NULL || *pos > *size) {
+        va_end(args);
+        va_end(cp);
+        return -1;
+    }
     n = vsnprintf(*buf + *pos, *size - *pos, format, args);
     if (n < 0) {
         free(*buf);
@@ -127,6 +133,13 @@ ssize_t safeAppend (char **buf, size_t *size, size_t *pos, const char *format, .
         void *tmp = NULL;
         // To avoid theoretical overflow of size_t (wraparound)
         while (*size - *pos <= need) {
+            if (*size > SIZE_MAX / 2) {
+                free(*buf);
+                *buf = NULL;
+                va_end(args);
+                va_end(cp);
+                return -1;
+            }
             *size *= 2;
             tmp = realloc(*buf, *size);
             if (tmp == NULL) {
@@ -211,15 +224,19 @@ size_t handleWrite(FileContent *file, FILE *fd, char *key, size_t *x, size_t *y)
         if (fileBuf == NULL) return 1;
         //Write to file
          for (size_t i = 0; i < file->lineCount; i++) {
-            if (i+1 == file->lineCount)
-                safeAppend(&fileBuf, &size, &len, "%s", file->lineArray[i].string);
-            else
-                safeAppend(&fileBuf, &size, &len, "%s\n", file->lineArray[i].string);
+            if (i+1 == file->lineCount) {
+                ssize_t ret = safeAppend(&fileBuf, &size, &len, "%s", file->lineArray[i].string);
+                if (ret == -1) return 1;
+            }
+            else {
+                ssize_t ret = safeAppend(&fileBuf, &size, &len, "%s\n", file->lineArray[i].string);
+                if (ret == -1) return 1;
+            }
         }
-        
         (*x)++;
-        fwrite(fileBuf, 1, strlen(fileBuf), fd);
+        fwrite(fileBuf, 1, len, fd);
         fflush(fd);
+        free(fileBuf);
     }
     return printContent(file, x, y);
 }
