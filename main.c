@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <errno.h>
 #include <stdarg.h>
 #include <stddef.h>
@@ -9,7 +11,6 @@
 #include <termios.h>
 
 static struct termios orig_termios;
-#define _POSIX_C_SOURCE 200809L
 
 void disableRawMode(void) {
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
@@ -24,9 +25,9 @@ void enableRawMode(void) {
     atexit(disableRawMode);
 
     struct termios raw = orig_termios;
-    raw.c_lflag &= ~(ECHO | ICANON);
-    raw.c_iflag &= ~(IXON | ICRNL);
-    raw.c_oflag &= ~(OPOST);
+    raw.c_lflag &= (tcflag_t)~(ECHO | ICANON);
+    raw.c_iflag &= (tcflag_t)~(IXON | ICRNL);
+    raw.c_oflag &= (tcflag_t)~(OPOST);
     raw.c_cc[VMIN] = 1;
     raw.c_cc[VTIME] = 0;
 
@@ -46,9 +47,37 @@ typedef struct {
     Line *lineArray;
 } FileContent;
 
+ssize_t safeAppend(char **buf, size_t *size, size_t *pos, const char *format, ...);
+
 void closeProgram() {
     disableRawMode();
     abort();
+}
+
+void enterNewLine(FileContent* file, size_t *x, size_t *y) {
+    char *trunc = strdup(&file->lineArray[*y].string[*x]);
+    if (trunc == NULL) {
+        closeProgram();
+    }
+
+    size_t truncLen = strlen(trunc);
+    file->lineArray[*y].string[*x] = '\0';
+    file->lineArray[*y].len = *x;
+
+    Line *tmp = realloc(file->lineArray, sizeof(Line) * (file->lineCount + 1));
+    if (tmp == NULL) {
+        free(trunc);
+        closeProgram();
+    }
+
+    file->lineArray = tmp;
+    memmove(&file->lineArray[(*y)+2], &file->lineArray[(*y)+1], sizeof(Line) * (file->lineCount - (*y + 1)));
+
+    file->lineCount++;
+    (*y)++;
+    *x = 0;
+    file->lineArray[(*y)].string = trunc;
+    file->lineArray[(*y)].len = truncLen;
 }
 
 size_t getTermSize(const FileContent *file) {
@@ -68,6 +97,46 @@ size_t getFileSize(const FileContent *file) {
             size += 1;
     }
     return size;
+}
+
+size_t writeFileContent(FileContent *file, FILE *fd) {
+    if (fseek(fd, 0, SEEK_SET) == -1) {
+        return 1;
+    }
+
+    size_t len = 0;
+    size_t size = getFileSize(file);
+    char *fileBuf = malloc(size);
+    if (fileBuf == NULL) return 1;
+
+    for (size_t i = 0; i < file->lineCount; i++) {
+        ssize_t ret;
+        if (i + 1 == file->lineCount) {
+            ret = safeAppend(&fileBuf, &size, &len, "%s", file->lineArray[i].string);
+        } else {
+            ret = safeAppend(&fileBuf, &size, &len, "%s\n", file->lineArray[i].string);
+        }
+
+        if (ret == -1) return 1;
+    }
+
+    if (fwrite(fileBuf, 1, len, fd) != len) {
+        free(fileBuf);
+        return 1;
+    }
+
+    if (fflush(fd) == EOF) {
+        free(fileBuf);
+        return 1;
+    }
+
+    if (ftruncate(fileno(fd), (off_t)len) == -1) {
+        free(fileBuf);
+        return 1;
+    }
+
+    free(fileBuf);
+    return 0;
 }
 
 FILE* openFile (const char* filename, char* modes) {
@@ -92,11 +161,13 @@ FileContent* loadContent (FILE* fd) {
     
     char *l = NULL;
     size_t cap = 0;
-    ssize_t contentLen;
+    ssize_t contentLen = 0;
 
     while ((contentLen = getline(&l, &cap, fd)) != (ssize_t)-1) {
-        if (contentLen > 0 && l[contentLen-1] == '\n') l[contentLen-1] = '\0';
-
+        if (contentLen > 0 && l[contentLen-1] == '\n') {
+            contentLen--;
+            l[contentLen] = '\0';
+        }
         Line *tmp = realloc(fileContent->lineArray, sizeof(Line) * (fileContent->lineCount + 1u));
         if(!tmp) {
             fprintf(stderr, "Error allocating memory for buffer: %s\n", strerror(errno));
@@ -105,14 +176,17 @@ FileContent* loadContent (FILE* fd) {
 
         fileContent->lineArray = tmp;
 
-        fileContent->lineArray[fileContent->lineCount].len = strlen(l);
+        fileContent->lineArray[fileContent->lineCount].len = (size_t)contentLen;
         fileContent->lineArray[fileContent->lineCount].string = strdup(l);
         fileContent->lineCount++;
     }
     if (fileContent->lineCount == 0) {
-        fileContent->lineCount += 1;
-        fileContent->lineArray = realloc(fileContent->lineArray, 16);
+        fileContent->lineArray = malloc(sizeof(Line));
         if(!fileContent->lineArray) closeProgram();
+        fileContent->lineArray[0].string = strdup("");
+        if(!fileContent->lineArray[0].string) closeProgram();
+        fileContent->lineArray[0].len = 0;
+        fileContent->lineCount = 1;
     }
     
     free(l);
@@ -221,61 +295,56 @@ size_t printContent (FileContent* file, size_t *xCord, size_t *yCord) {
 }
 
 size_t handleWrite(FileContent *file, FILE *fd, char *key, size_t *x, size_t *y) {
-    if (*key != '\x1b' && *key != '\x7f') {
-        fseek(fd, 0, SEEK_SET);
-        file->lineArray[*y].string = realloc(file->lineArray[*y].string, file->lineArray[*y].len+2);
+    if (*key != '\x1b' && *key != '\x7f' && *key != '\r') {
+        char *tmp = realloc(file->lineArray[*y].string, file->lineArray[*y].len+2);
+        if (tmp == NULL) {
+            return 1;
+        }
+
+        file->lineArray[*y].string = tmp;
         memmove(&file->lineArray[*y].string[(*x)+1], &file->lineArray[*y].string[(*x)], file->lineArray[*y].len - *x + 1);
           
         file->lineArray[*y].string[(*x)] = *key;
         file->lineArray[*y].len++;
-
-        size_t len = 0;
-        size_t size = getTermSize(file);
-        char *fileBuf = malloc(size);
-        if (fileBuf == NULL) return 1;
-        //Write to file
-         for (size_t i = 0; i < file->lineCount; i++) {
-            if (i+1 == file->lineCount) {
-                ssize_t ret = safeAppend(&fileBuf, &size, &len, "%s", file->lineArray[i].string);
-                if (ret == -1) return 1;
-            }
-            else {
-                ssize_t ret = safeAppend(&fileBuf, &size, &len, "%s\n", file->lineArray[i].string);
-                if (ret == -1) return 1;
-            }
-        }
         (*x)++;
-        fwrite(fileBuf, 1, len, fd);
-        fflush(fd);
-        free(fileBuf);
+    } else if (*key == '\r') {
+        enterNewLine(file, x, y);
     } else {
-        fseek(fd, 0, SEEK_SET);
-        memmove(&file->lineArray[*y].string[(*x)-1], &file->lineArray[*y].string[(*x)], file->lineArray[*y].len - *x + 1);
-        file->lineArray[*y].len--;
-        (*x)--;
+        if (*x > 0) {
+            memmove(&file->lineArray[*y].string[(*x)-1], &file->lineArray[*y].string[*x], file->lineArray[*y].len - *x + 1);
+            file->lineArray[*y].len--;
+            (*x)--;
+        } else if (*y > 0) {
+            size_t prev = *y - 1;
+            size_t prevLen = file->lineArray[prev].len;
+            size_t curLen = file->lineArray[*y].len;
+            char *tmp = realloc(file->lineArray[prev].string, prevLen + curLen + 1);
+            if (tmp == NULL) {
+                return 1;
+            }
 
-        size_t len = 0;
-        size_t size = getTermSize(file);
-        char *fileBuf = malloc(size);
-        if (fileBuf == NULL) return 1;
-        for (size_t i = 0; i < file->lineCount; i++) {
-            if (i+1 == file->lineCount) {
-                ssize_t ret = safeAppend(&fileBuf, &size, &len, "%s", file->lineArray[i].string);
-                if (ret == -1) return 1;
-            }
-            else {
-                ssize_t ret = safeAppend(&fileBuf, &size, &len, "%s\n", file->lineArray[i].string);
-                if (ret == -1) return 1;
-            }
+            file->lineArray[prev].string = tmp;
+            memcpy(&file->lineArray[prev].string[prevLen], file->lineArray[*y].string, curLen + 1);
+            file->lineArray[prev].len = prevLen + curLen;
+
+            free(file->lineArray[*y].string);
+            memmove(&file->lineArray[*y], &file->lineArray[*y + 1], sizeof(Line) * (file->lineCount - (*y + 1)));
+            file->lineCount--;
+            *y = prev;
+            *x = prevLen;
         }
-        fwrite(fileBuf, 1, len, fd);
-        fflush(fd);
-        free(fileBuf);
     }
+
+    if (writeFileContent(file, fd) != 0) {
+        return 1;
+    }
+
     return printContent(file, x, y);
 }
 
 size_t handleMove (FileContent* file, char *key, size_t *x, size_t *y, char *buf) {
+    (void)buf;
+
     if (*key == '\x1b') {
             char seq[2];
             
@@ -337,7 +406,7 @@ int main () {
     size_t x = 0;
     size_t y = 0;
 
-    size_t bufSize =  printContent(content, &x, &y);
+    printContent(content, &x, &y);
 
     while (1) {
         char c;

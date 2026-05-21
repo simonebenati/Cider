@@ -1,3 +1,6 @@
 .vscode/
 build/
 *.out
+File.txt
+.agents/
+.codex/
